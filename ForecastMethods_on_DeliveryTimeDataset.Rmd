@@ -1,0 +1,815 @@
+---
+title: "497 project"
+author: "Kardelen"
+date: "2024-12-07"
+output: html_document
+---
+
+
+```{r}
+library(tseries)
+library(gridExtra)
+library(tibbletime)
+library(tidyverse)
+library(timetk)
+library(anomalize)
+library(ggplot2)
+library(forecast)
+library(lmtest)
+library(fUnitRoots)
+library(pdR)
+library(tsDyn)
+library(lmtest)
+library(feasts)
+library(fable)
+library(fable.prophet)
+library(tsibble)
+library(dplyr)
+library(lubridate)
+```
+
+1.	Introduction covering data descripition, aim and the source of data.
+
+2.	Time series plot and interpretation 
+
+```{r}
+data <- read.csv("C://Users//karde//OneDrive//Documents//497NY.csv")
+class(data)
+str(data)
+summary(data)
+head(data)
+
+newdata <- ts(data$DTFDISA066MSFRBNY, 
+              start = c(2001, 7),  # start: 7th of 2001
+              frequency = 12)     # monthly
+str(newdata)
+class(newdata)
+summary(newdata)
+frequency(newdata)
+length(newdata) # number of obs is 281 > 50
+head(newdata)
+tail(newdata)
+sum(is.na(newdata))
+
+```
+
+Diffusion Index = (% Increase - % Decrease)
+If the percentage of "Decrease" responses exceeds the 
+percentage of "Increase" responses, the index becomes negative.
+
+```{r}
+autoplot(newdata,main = "Time Series Plot of Future Delivery Time; Diffusion Index for New York") + theme_bw()# plot  exhibits fluctuations over time. To determine if there's a significant trend, let's decompose to interpet better.
+# Load necessary libraries
+library(ggplot2)
+library(forecast)
+
+# Create the time series plot with enhancements
+autoplot(newdata, main = "Time Series Plot of Future Delivery Time\nDiffusion Index for New York") +
+  labs(x = "Time", y = "Value") + # Label axes
+  theme_bw() + # Base theme for clean appearance
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5), # Center and style title
+    axis.title = element_text(size = 12), # Style axis titles
+    axis.text = element_text(size = 10), # Style axis tick labels
+    panel.grid = element_blank() # Remove grid lines for a cleaner look
+  ) +
+  scale_color_manual(values = c("blue")) # Customize color
+
+```
+
+```{r}
+p1<-ggAcf(newdata,main="ACF of Delivery Time",lag.max = 60)
+p2<-ggPacf(newdata,main="PACF of Delivery Time",lag.max = 60)
+grid.arrange(p1,p2,nrow=1)
+```
+We have expo behaviour in ACF plot and significant spikes in PACF plot
+
+ Since our t.s. data plot does not have trend, it is better for use to use twitter decomposition. To use it, we need tibble format.
+```{r}
+data$DATE <- as.Date(data$DATE, format = "%Y-%m-%d")
+
+data <- as_tibble(data)
+colnames(data)
+data$DTFDISA066MSFRBNY <- as.double(data$DTFDISA066MSFRBNY)
+str(data)
+
+tt <- time_decompose(data,DTFDISA066MSFRBNY,method= "twitter",merge= TRUE,message= FALSE)
+tt
+colnames(tt)
+
+autoplot(ts(tt$season,frequency = 12), main="Plot of Seasonal Component",col="blue",ylab="Season")+theme_minimal() 
+
+autoplot(ts(tt$observed,frequency = 12), main="Plot of Observed Component",col="blue",ylab="Observed")+theme_minimal() 
+
+autoplot(ts(tt$remainder,frequency = 12), main="Plot of Remainder Component",col="blue",ylab="Remainder")+theme_minimal()
+
+#since the remainder and observed gave the almost same plot, I want to check their equality
+identical(tt$observed, tt$remainder) # false
+
+
+
+
+```
+Since the decomposition result shows that the observed data equals the residuals, it indicates that there is no need for trend or seasonal adjustments in the model. This suggests that the data is already stationary and does not exhibit significant trends or seasonality that would require further modeling adjustments.
+
+
+Box plot across months to explore seasonal effects and detect outliers if there exists.
+```{r}
+
+boxplot(newdata~cycle(newdata),xlab="Months",ylab="Future Delivery Time; Diffusion Index for New York")
+
+library(ggplot2)
+
+# Assuming newdata is your time series data
+ggplot(data.frame(newdata), aes(x = factor(cycle(newdata)), y = newdata)) +
+  geom_boxplot(fill = "lightblue", color = "black") +
+  xlab("Months") +
+  ylab("Future Delivery Time; Diffusion Index for New York") +
+  theme_minimal()
+
+```
+ Since the median values don't follow a standard line at 0, we can say there is seasonality. Also, we observe outliers in the 1st,3rd, 5th, 9th, 10th, and 11th months.
+ 
+ 
+ 3.    Cross Validation
+ 
+```{r}
+newdata
+traindata <- window(newdata,  end = c(2023, 11))
+testdata <- window(newdata, start = c(2023, 12))
+length(testdata)
+```
+ 
+
+ 
+
+4.   Make a anomaly detection and if necessary clean the series from anomalies (use anomalize, forecast (tsclean function) or AnomalyDetection packages).
+
+
+-   Identify and Replace Outliers and Missing Values in Time Series Before Anomaly Detection
+```{r}
+
+str(traindata) # use traindata for tsclean because its str is ts
+traindata <- tsclean(traindata)
+summary(traindata)
+boxplot(traindata~cycle(traindata),xlab="Months",ylab="Future Delivery Time; Diffusion Index for New York")
+#  after ts clean only 10th outlier gone
+sum(is.na(traindata)) # 0 
+
+# We don't have any missing values, but we do have outliers, as shown in the box plot.
+
+z_scores <- (traindata - mean(traindata, na.rm = TRUE)) / sd(traindata, na.rm = TRUE)
+#This checks for values in z_scores that are more than 1.3 standard deviations away from the mean. 
+outliers <- which(abs(z_scores) > 1.6) #First, I tried a threshold of > 1.5, but since some outliers remained, I hightened the threshold to 1.6 so that all outliers were removed.
+
+ts_data_no_outliers <- traindata
+ts_data_no_outliers[outliers] <- NA # Interpolates (fills in) the missing values (NA) from the outliers using surrounding data points.
+train_ts_data_no_outliers <- na.interp(ts_data_no_outliers)
+str(train_ts_data_no_outliers)
+
+# Assuming newdata is your time series data
+ggplot(data.frame(train_ts_data_no_outliers), aes(x = factor(cycle(train_ts_data_no_outliers)), y = train_ts_data_no_outliers)) +
+  geom_boxplot(fill = "lightblue", color = "black") +
+  xlab("Months") +
+  ylab("Train Set for Future Delivery Time") +
+  theme_minimal()
+
+```
+
+-     Anomaly Detection
+  Tibble format needed, first we need dataframe then tibble from ts data
+```{r}
+
+ts_data_df <- data.frame(Date = seq(from = as.Date("2001-07-01"), by = "month", length.out = length(train_ts_data_no_outliers)),
+                         Value = as.numeric(train_ts_data_no_outliers))
+
+
+ts_data_tibble <- as_tibble(ts_data_df)
+
+ts_data_tibble %>%
+  anomalize::time_decompose(Value, method = "twitter", frequency = "auto", trend = "auto") %>%
+  anomalize::anomalize(remainder, method = "gesd", alpha = 0.05, max_anoms = 0.2) %>%
+  anomalize::plot_anomaly_decomposition()
+
+```
+
+-   Anomaly detection 2nd way
+```{r}
+ts_data_tibble %>% 
+  anomalize::time_decompose(Value) %>%
+  anomalize::anomalize(remainder) %>%
+  anomalize::time_recompose() %>%
+  anomalize::plot_anomalies(time_recomposed = TRUE, ncol = 3, alpha_dots = 0.5)
+```
+  In both approach, it is shown that there is no anomaly.
+  
+
+
+
+5.  	Box-Cox transformation analysis: If the series need any transformation, do it. If the information criterion (or log-likelihood) values are too close to each other, don’t transform the data.
+
+```{r}
+lambda <- BoxCox.lambda(traindata) 
+lambda # 0.93 , closer to 1 -> we do not need transformation, data already has an appropriate distribution.
+```
+
+
+6. ACF, PACF plots, KPSS and ADF or PP test results  for zero mean, mean and trend cases and their interpretation. For seasonal unit root, HEGY (only for quarterly and monthly series) and OCSB or Canova-Hansen tests are required.
+
+```{r}
+
+p1<-ggAcf(traindata,main="ACF of train set",lag.max = 60)
+p2<-ggPacf(traindata,main="PACF of train set ",lag.max = 60)
+grid.arrange(p1,p2,nrow=1)
+
+```
+
+
+ KPSS
+ H0: the time series is stationary
+ H1: the time series is not stationary
+ We have tibble format, but kpss.test function expects a univariate time series or a numeric vector. So:
+```{r}
+class(traindata)
+tseries::kpss.test(traindata,null=c("Level")) # p val 0.086
+
+```
+Fail to reject H0, series is stationary.
+
+'''''''''''''''''''''''''''
+
+ ADF(type="c")
+ H0: Data have unit root, is not stationary.
+ H1: The process is stationary.
+ 
+```{r}
+ggPacf(traindata,main="PACF of Delivery Time",lag.max = 60)
+adfTest(traindata, lags=1, type="c") # pval 0.01<0.05-> rej H0 -> there is no unit root.
+```
+ No need to ADF(type="nt" or "nc")
+ 
+ ''''''''''''''''''''''''''
+ 
+ PP Test 
+ H0: The process has unit root (non-stationary)
+ H1: The process is stationary
+ 
+
+ HEGGY Test
+```{r}
+mean(traindata) # not zero, there is intercept -> i=1
+test_hegy <- HEGY.test(traindata, itsd=c(1,1,0),regvar=0, selectlags=list(mode="aic", Pmax=12))
+test_hegy$stats
+```
+There is no regular and seasonal unit root.
+
+OSCB TEST
+```{r}
+head(traindata,12);tail(traindata,12)
+
+traindata_trimmed <- traindata[7:258]# WE only consider from 2002 january to 2022 december
+length(traindata_trimmed)
+traindata_ts <- ts(traindata_trimmed, start = c(2001, 12), frequency = 12)
+
+n_years <- length(traindata_ts) %/% 12 # number of years= 21
+years <- rep(2002:(2002+ n_years - 1), each = 12)
+group_factor <- factor(years)
+model <- lm(traindata_ts ~ group_factor)
+
+# CONTRASTS FOR OCSB 
+contrasts(group_factor) <- contr.sum(length(levels(group_factor)))
+
+# ANOVA TEST
+summary(aov(model))
+```
+
+This p-value is very small (approximately 1.29 × 10⁻⁶), indicating that the differences between the years are statistically significant.
+
+
+7.  No additional analysis is needed because there is no trend or seasonality
+
+8.  Then, look at the time series plot of a stationary series, ACF and PACF plots, information table, ESACF.(last two are for non-seasonal series).
+
+
+eacf: Compute the sample extended acf (ESACF) : the function for it is below but it is appropriate for non seasonal as only ar ma included not sar and sma. 
+```{r}
+TSA::eacf(traindata) # -- > ARMA(3,1) 
+```
+  Informatiın table gives us the AR and MA coefficients, Order of differencing (d), AIC, BIC, and log-likelihood, Residual diagnostics, such as the Ljung-Box test statistic (which checks for autocorrelation in residuals) to a summary table that provides key statistical metrics and details about a fitted time series model. We'll conduct it after fitting models.
+
+
+
+9.	Identify a proper ARMA or ARIMA model or SARIMA model. 
+```{r}
+p1 <- ggAcf(traindata, lag.max = 60) + ggtitle("ACF of Train Set")
+p2 <- ggPacf(traindata, lag.max = 60) + ggtitle("PACF of Train Set")
+
+grid.arrange(p1,p2,nrow=1)
+
+```
+We have one significant spike at pacf plot(AR-1), acf shows sinusodial behaviour. We have also significant seasonal spikes in ACF plot. 
+Possible models:
+ARIMA-SARIMA
+
+1,0,0 - 0,0,1
+1,0,1 - 0,0,1
+1,0,2 - 0,0,1
+
+1,0,0 - 0,0,3
+1,0,1 - 0,0,3
+1,0,2 - 0,0,3
+
+1,0,3 - 0,0,1
+1,0,3 - 0,0,1
+1,0,3 - 0,0,1
+
+1,0,3 - 0,0,3
+1,0,3 - 0,0,3
+1,0,3 - 0,0,3
+
+
+
+10.	After deciding the order of the possible model (s), run MLE or conditional or uncondinitional LSE and estimate the parameters. Compare the information criteria of several models. (Note: If there is a convergence problem, you can change your estimation method).  
+
+ The arima() function automatically uses Maximum Likelihood Estimation (MLE) to estimate the model parameters. You do not need to manually implement MLE, as it is handled by the function.
+
+```{r}
+# Fit the twelve models
+model1 <- arima(traindata, order=c(1,0,0), seasonal=list(order=c(0,0,1), period=12))
+model2 <- arima(traindata, order=c(1,0,1), seasonal=list(order=c(0,0,1), period=12))
+model3 <- arima(traindata, order=c(1,0,2), seasonal=list(order=c(0,0,1), period=12))
+
+model4 <- arima(traindata, order=c(1,0,0), seasonal=list(order=c(0,0,3), period=12))
+model5 <- arima(traindata, order=c(1,0,1), seasonal=list(order=c(0,0,3), period=12))
+model6 <- arima(traindata, order=c(1,0,2), seasonal=list(order=c(0,0,3), period=12))
+
+model7 <- arima(traindata, order=c(1,0,3), seasonal=list(order=c(0,0,1), period=12))
+model8 <- arima(traindata, order=c(1,0,3), seasonal=list(order=c(0,0,1), period=12))
+model9 <- arima(traindata, order=c(1,0,3), seasonal=list(order=c(0,0,1), period=12))
+
+model10 <- arima(traindata, order=c(1,0,3), seasonal=list(order=c(0,0,3), period=12))
+model11 <- arima(traindata, order=c(1,0,3), seasonal=list(order=c(0,0,3), period=12))
+model12 <- arima(traindata, order=c(1,0,3), seasonal=list(order=c(0,0,3), period=12))
+```
+
+
+Compare them by looking at their information table
+```{r}
+model1;model2;model3;model4;model5;model6;model7;model8;model9;model10;model11;model12
+```
+
+Here are fitted models and the insignificant parameters.
+
+1
+2,1ma
+3,2ma
+4,sma3
+5,sma3
+6,sma3
+7,ma3
+8,ma3
+9,ma3
+10,sma3
+11,sma3
+12,sma3
+
+```{r}
+arima(traindata, order=c(8,0,0), seasonal=list(order=c(1,0,0), period=12)) # I just wanted to try another possibilities
+arima(traindata, order=c(1,0,2), seasonal=list(order=c(0,0,1), period=12)) # they both have insig. prmters
+```
+
+
+
+11.	Diagnostic Checking: 
+
+a)	On the residuals, perform portmanteau lack of fit test, look at the ACF-PACF plots of the resuduals (for all time points, ACF and PACF values should be in the white noise bands), look at the standardized residuals vs time plot to see any outliers or pattern. 
+
+
+```{r}
+Arimamodel <- arima(traindata, order=c(1,0,0), seasonal=list(order=c(0,0,1), period=12))
+res <- Arimamodel$residuals
+
+head(traindata,12);tail(traindata,12)
+
+# Perform Ljung-Box(portmanteau lack of fit) test on residuals for autocorrelation (up to 12 lags)
+# H₀: The residuals are uncorrelated
+Box.test(res, lag=12, type="Ljung-Box")
+
+```
+ p-value = 0.4381> 0.05-> Fail to reject the null hypothesis, meaning the residuals are likely white noise and the model fits the data well.
+
+```{r}
+p1 <- ggAcf(res, lag.max = 0.2 * length(traindata)) + ggtitle("ACF of Train Set")
+p2 <- ggPacf(res, lag.max = 0.2 * length(traindata)) + ggtitle("PACF of Train Set")
+
+grid.arrange(p1,p2,nrow=1)
+```
+
+```{r}
+# Standardize the residuals
+std_residuals <- res / sqrt(Arimamodel$sigma2)
+
+# Time index for plotting
+time_index <- time(traindata)
+
+# Plot standardized residuals against time
+plot(time_index, std_residuals, type = "o", col = "blue", 
+     xlab = "Time", ylab = "Standardized Residuals", 
+     main = "Standardized Residuals vs Time")
+
+```
+mean of residuals closer to zero, there are at least two outliers. At some points, residuals have clustering behavior. There is no pattern but fluctuations. 
+to interpret better plot std^2.
+
+
+```{r}
+
+# Assuming std_residuals is already defined
+plot(std_residuals^2, type="l", main="Squared Residuals vs Time", 
+     ylab="Squared Residuals", xlab="Time", col=rainbow(length(std_residuals)), lwd=2)
+
+```
+There are significant spikes which means outliers, no noticiable trend but clustering effect indicating heteroscadasticity.
+
+
+
+b) Use histogram, QQ-plot and Shapiro-Wilk test (in ts analysis, economists prefer Jarque-Bera test) to check normality of residuals. 
+
+```{r}
+hist(residuals(Arimamodel), main = "Histogram of Residuals", xlab = "Residuals", col = "skyblue", border = "black")
+```
+It is slightly left skewed but mostly symmetric and seems like normal.
+
+```{r}
+qqnorm(residuals(Arimamodel)); qqline(residuals(Arimamodel), col = "red")  # Add a reference line for normality
+```
+there are outliers and is slightly S shape indicating residuals may have heavy tailed distributions.
+
+
+```{r}
+shapiro.test(residuals(Arimamodel))  # pval= 0. > 0.5, FTR H0, residuals are normally distributed.
+```
+
+```{r}
+jarque.bera.test(residuals(Arimamodel))  # pval= 0.6 > 0.5, FTR H0, residuals are normally distributed.
+```
+
+
+c) Perform Breusch-Godfrey test for possible autocorrelation in residual series. The result should be insignificant.
+
+```{r}
+# Yardımcı model: Kalıntıları regresyon ile kullan
+auxiliary_model <- lm(res ~ time(res))
+
+bgtest(auxiliary_model, order = 1)
+```
+pval= 0.87 > 0.5, FTR H0, residuals do not have serial correlation, they are independent.
+
+
+
+d) For the Heteroscedasticity, look at the ACF-PACF plots of the squared residuals (there should be no significant spikes); perform ARCH Engle's Test for Residual Heteroscedasticity under aTSA package. The result should be insignificant. If there is a heteroscedasticity problem, most probably normality test on residuals will fail. The high values in the lower and upper extremes destroy the normality due to high variation. Then try to fit GARCH type family on the variance of the residuals.
+
+```{r}
+squared_residuals <- residuals(Arimamodel)^2
+
+p1 <- ggAcf(squared_residuals, lag.max = 60) + ggtitle("ACF of squared residuals")
+p2 <- ggPacf(squared_residuals, lag.max = 60) + ggtitle("PACF of squared residuals")
+
+grid.arrange(p1,p2,nrow=1)
+```
+All squared residuals are in the white noise bands. We can concluded that we do not have heteroscadasticity problem, error variance is constant.
+
+
+
+ ARCH Engle's Test for Residual Heteroscedasticity under aTSA package.
+ H0: Residuals have constant variance (no heteroscedasticity).
+```{r}
+
+aTSA::arch.test(Arimamodel)
+```
+Portmanteau-Q test checks for the autocorrelations. Since all p values are above the 0.05 indicating the residuals are independent.
+
+Lagrange-Multiplier (LM) test checks for the heteroscadasticity. For the first two lag the pvalue under the 0.05 indicating nonconstant error variance at these lags(4 & 8)
+
+
+
+
+12.	Forecasting: The number of forecasts should be same as the length of your test data.
+
+a.	Perform Minimum MSE Forecast for the stochastic models (like ARIMA or SARIMA) 
+
+```{r}
+arımaF <- forecast(Arimamodel, h=12) 
+autoplot(arımaF)+autolayer(testdata, series="actual")+theme_minimal()+ggtitle("Forecast of SARIMA")+autolayer(fitted(Arimamodel), series="Fitted")
+```
+
+b.	Use ets code under the forecast package to choose the best exponential smoothing (simple, Holt’s, Holt-Winter’s) method that suits your series for deterministic forecasting. Check the assumptions. (NOTE: Do not run these methods separately. If your data has a seasonality and ets code cannot capture it, then you can try Holt-Winters alone).
+
+Simple seasonal smoothing suits best for our data.
+```{r}
+modelets <- ets(traindata,model="ZZZ")
+modelets
+etsF <- forecast(modelets, h=12) 
+autoplot(etsF)+autolayer(testdata, series="actual")+theme_minimal()+ggtitle("Forecast of ETS")+autolayer(fitted(modelets), series="Fitted")
+
+```
+there are additive error and additive seasonality but no trend. ets captured well. 
+the est model weakly capture the seasonal behavior and prediction intervals seems wide indicating not strong fit. 
+
+As an assumption we should check normal residuals for better forecast in ets.
+
+```{r}
+# Perform the Shapiro-Wilk test on the residuals starting from 2002 (window function)
+shapiro.test(window(modelets$residuals, start=c(2002,1)))
+```
+p val is 0.7 indicating residuals are normal.
+
+
+c.	Obtain forecasts using neural networks (nnetar). Check the assumptions.
+
+nnetar can give sucsessful results/forecast since our data has seasonality.
+
+As an assumption we can check overfitting before nnetar by compairing the RMSE values of train and test set.
+```{r}
+train_predictions <- forecast:: forecast(modelets, h=length(traindata))$mean 
+train_predictions_numeric <- as.numeric(train_predictions)
+
+train_errors <- as.numeric(traindata) - train_predictions_numeric  
+train_rmse <- sqrt(mean(train_errors^2))  
+
+test_predictions <- forecast::forecast(modelets, h=length(testdata))$mean  
+test_data_numeric <- as.numeric(testdata)
+
+test_errors <- test_data_numeric - as.numeric(test_predictions)  
+test_rmse <- sqrt(mean(test_errors^2))  
+
+cat("Train RMSE:", train_rmse, "\n") # 7.95
+cat("Test RMSE:", test_rmse, "\n") # 7.98
+```
+Since the RMSE values very close to each other we can say there is no overfitting problem.
+
+```{r}
+modelnnetar <- nnetar(traindata)
+nnetarF <- forecast(modelnnetar, h=12)  # 'h' is the forecast horizon
+autoplot(nnetarF)+autolayer(testdata, series="actual")+theme_minimal()+ggtitle("Forecast of NNETAR")+autolayer(fitted(modelnnetar), series="Fitted")
+
+```
+
+nnetar model has a really strong fit in train data. additionaly it vaptures the peaks in test data with less variance. it can be count as strong fit model.
+
+
+d.	Obtain forecasts using neural networks (TBATS). Check the assumptions.
+
+
+```{r}
+date_seq <- seq(from = as.Date("2002-01-01"), by = "month", length.out = length(traindata))
+traindata_tibble <- tibble(DATE = date_seq, value = as.numeric(traindata))
+
+decomposed_data <- time_decompose(traindata_tibble, value, method = "twitter", merge = TRUE, message = FALSE)
+
+autoplot(ts(decomposed_data$season, frequency = 12), main="Seasonal Component of Time Series", col="blue", ylab="Seasonal Component") +
+  theme_minimal()
+```
+When the data has complex seasonlity like Multiple Seasonality,
+High Seasonal Frequency and Non-interger seasonality applying tbats model is appropriate. To check multiple seasonality and non-integer seasonality for train set we can use seasonal decomposition.
+
+From this plot, we can see two peaks within each year. It may not be enough to say we have multiple frequency and should use tbats. 
+Also, since the plot does no show irregular patters, we could not indicate non-integral seasonality.
+
+To deteck multiple seasonalities in several ways.
+1) by identifying peaks in different frequencies we can use spectral analysis:
+the spike at frequency 1 indicates a yearly seasonality. It is common in the montly datasets.Therefore we can not say ve have multiple seasonality.Additionaly,we cannot expect like weekly or daily seasonality since our data is monthly.
+
+Also we have a spike at 0 meaning the trend but as we tested, we don't have any trend. It may also represent the mean level of our train data.
+
+2) using mstl decomposition:
+As a result of mstl decomposition we can say the seasonal decomposition captured repeating cycles with 12 months again.
+3) using tbats model summary:
+Also, we can see the seasonal period is 1 indicating yearly seasonality.
+
+At the end we can say our data does not have enough seasonal compexity for tbats. The simplier methods like ets or arima might be better to use. 
+
+```{r}
+spectrumm <- spec.ar(traindata, log="no")
+```
+
+```{r}
+mstl_decomp <- mstl(traindata)
+plot(mstl_decomp)
+```
+
+3) using tbats model summary
+```{r}
+modeltbats <- tbats(traindata)
+summary(modeltbats)
+
+```
+
+```{r}
+tbatsF <-  forecast(modeltbats, h=12)
+autoplot(tbatsF)+autolayer(testdata, series="actual")+theme_minimal()+ggtitle("Forecast of TBATS")+autolayer(fitted(modeltbats), series="Fitted")
+```
+
+
+```{r}
+# Perform the Shapiro-Wilk test on the residuals starting from 2002 (window function)
+shapiro.test(window(residuals(modeltbats), start=c(2002,1)))
+```
+p value is 0.6 indicating our residuals normally distributed.
+
+
+
+12)I PUT THE PROPHET AT THE END SINCE ITS ONE OF THE LIBRARIES CAUSED AN ERROR
+
+13.	If you transformed the series for (S)ARIMA model, back transform the series (and its forecasts and prediction limits as well) to reach the estimates for the original units. 
+
+no transformation
+
+14.	Calculate the accuracy for the train set. Calculate the forecast accuracy measures and state which model gives the highest performance for your dataset. Discuss the possibility of overfitting.
+
+Arıma  Accuracy
+```{r}
+accuracy(arımaF,testdata)
+```
+
+ets Accuracy
+
+```{r}
+accuracy(etsF,testdata)
+```
+
+nnetar  Accuracy
+```{r}
+accuracy(nnetarF,testdata)
+```
+
+tbats  Accuracy
+```{r}
+accuracy(tbatsF,testdata)
+```
+
+Prophet  Accuracy 
+```{r}
+rmse_prophet_train;mae_prophet_train;mape_prophet_train 
+```
+prophet
+```{r}
+accuracy(tail(prophetF$yhat,12),testdata)
+```
+
+
+nnetar gave the best for train
+tbats best for test.
+
+
+e.	Obtain forecasts using neural networks (prophet). Check the assumptions.
+
+
+
+```{r}
+# Create a data frame for Prophet
+ds <- seq(as.Date("2001/07/01"), by = "month", length.out = length(traindata))
+df <- data.frame(ds, y = as.numeric(traindata))
+
+# Check for missing values
+if (any(is.na(df$y))) {
+  stop("The time series contains missing values. Please handle them before proceeding.")
+}
+
+# Fit the Prophet model
+train_prophet <- prophet(df)
+library(prophet)
+# Create a future dataframe for the next 12 months
+
+future <- make_future_dataframe(train_prophet, periods = 12, freq = "month")
+
+# Generate forecasts
+forecast <- predict(train_prophet, future)
+
+# Plot the forecast
+plot(train_prophet, forecast)
+
+# Optional: Visualize forecast components (trend, seasonality)
+prophet_plot_components(train_prophet, forecast)
+
+```
+
+
+```{r}
+ds <- seq(as.Date("2001/07/01"), by = "month", length.out = length(traindata))
+
+df<-data.frame(ds,y=as.numeric(traindata))
+
+library(prophet)
+train_prophet <- prophet(df)
+
+future<-make_future_dataframe(train_prophet,periods = 12)
+
+prophetF <- predict(train_prophet, future)
+```
+
+
+Fitting a prophet model is easy and that was the intention behind development of the model for usage by non-experts. However, it is extremely important to tune the parameters before deploying the model.
+```{r}
+library(prophet)
+changepoint_prior <- c(0.1, 0.5, 0.9)
+seasonality_prior <- c(0.1, 0.3, 0.5)
+changepoint_range <- c(0.6, 0.8, 0.9)
+
+results <- data.frame(
+  changepoint_prior = numeric(),
+  seasonality_prior = numeric(),
+  changepoint_range = numeric(),
+  RMSE = numeric()
+)
+
+for (cp in changepoint_prior) {
+  for (sp in seasonality_prior) {
+    for (cr in changepoint_range) {
+      m <- prophet(
+        changepoint.prior.scale = cp,
+        seasonality.prior.scale = sp,
+        changepoint.range = cr
+      )
+      m <- fit.prophet(m, df) 
+      
+
+      future <- make_future_dataframe(m, periods = 12, freq = "month")
+      forecast <- predict(m, future)
+      
+      predicted <- tail(forecast$yhat, 12)
+      acc <- accuracy(predicted, testdata)  
+      rmse <- acc["Test set", "RMSE"]  # Extract RMSE from accuracy
+      
+      results <- rbind(results, data.frame(
+        changepoint_prior = cp, 
+        seasonality_prior = sp, 
+        changepoint_range = cr, 
+        RMSE = rmse
+      ))
+    }
+  }
+}
+
+#best parameters
+best_params <- results[which.min(results$RMSE), ]
+best_params
+```
+
+```{r}
+ds <- seq(as.Date("2001/07/01"), by = "month", length.out = length(traindata))
+df<-data.frame(ds,y=as.numeric(traindata))
+prophet_new <- prophet(df,changepoint.range=0.6,changepoint.prior.scale=0.5,seasonality.prior.scale=0.5)
+library(prophet)
+future_new2 <-  make_future_dataframe(prophet_new,periods = 12, freq = "month")
+forecast_new2 <- predict(prophet_new, future_new2)
+
+```
+
+normal prophet acc
+```{r}
+accuracy(tail(prophetF$yhat,12),testdata)
+
+```
+
+hypertuning accuracy
+```{r}
+accuracy(tail(forecast_new2$yhat,12),testdata)
+```
+
+Since hyper tuning prophet gave bette result, we can use it to forecast.
+
+
+Here is its train accuracy:
+```{r}
+# Step 1: Extract the forecasted values
+forecast_train <- forecast_new2$yhat[1:length(df$y)] # Forecasted values for training data
+actual_train <- df$y # Actual values from the training data
+
+# RMSE (Root Mean Squared Error)
+rmse_prophet_train <- Metrics::rmse(actual_train, forecast_train)
+
+# MAE (Mean Absolute Error)
+mae_prophet_train <- Metrics::mae(actual_train, forecast_train)
+
+# MAPE (Mean Absolute Percentage Error)
+mape_prophet_train <- Metrics::mape(actual_train, forecast_train)
+
+```
+
+
+
+15.	Provide plots of the original time series, predictions, forecasts, and prediction intervals on the same plot drawing the forecast origin for all models. The plot for each model should look like the following plot.
+
+DONE in EACH OF RELATED STEP 
+
+16.	Give your conclusion.
+
+
+
+
+
+
+
+
+
